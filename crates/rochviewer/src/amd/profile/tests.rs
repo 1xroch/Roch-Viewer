@@ -242,6 +242,8 @@ fn power(
         values: values.iter().copied().collect(),
         limits: limits.iter().copied().collect(),
         temperatures: temperatures.iter().copied().collect(),
+        svi3: Readings::new(),
+        core_power: Readings::new(),
     })
 }
 
@@ -1063,12 +1065,20 @@ fn temperatures_and_limits_share_one_section() {
         // maximum per row, which a value that never moves has no use for.
         // PCH and PCIEX16 follow the board's own three; they come from
         // the board-gated monitor and are hidden where it reads nothing.
+        // The hottest core leads its eight, which fold under it, and the
+        // SVI3 rails' currents and powers follow the budgets they draw on.
         [
             "CPU Temp", "IOD Average", "IOD Hotspot", "L3 Temp",
             "VDDCR_VDD VRM", "VDDCR_SOC VRM", "VDD_MISC VRM",
+            "Core Temp (max)", "Core 0 Temp", "Core 1 Temp", "Core 2 Temp", "Core 3 Temp",
+            "Core 4 Temp", "Core 5 Temp", "Core 6 Temp", "Core 7 Temp",
             "CPU Temp (board)", "VRM Temp (board)", "System Temp",
             "PCH Temp", "PCIEX16 Temp",
             "PPT", "TDC", "EDC",
+            "VDDCR_VDD Current", "VDDCR_SOC Current", "VDD_MISC Current",
+            "VDDCR_VDD Power", "VDDCR_SOC Power", "VDD_MISC Power", "VDD + SOC + MISC Power",
+            "Core Power (sum)", "Core 0 Power", "Core 1 Power", "Core 2 Power", "Core 3 Power",
+            "Core 4 Power", "Core 5 Power", "Core 6 Power", "Core 7 Power",
         ]
     );
     for row in &section {
@@ -2153,6 +2163,39 @@ fn the_pmic_rails_carry_their_own_names() {
     assert_eq!(shown["CHA VIN"].as_deref(), Some("CHA VIN (5V)"));
     assert_eq!(shown["CHA 1.8V output"].as_deref(), Some("CHA LDO 1.8V"));
     assert_eq!(shown["CHB 1.0V output"].as_deref(), Some("CHB LDO 1.0V"));
+}
+
+#[test]
+fn a_lost_first_read_does_not_blank_only_the_first_rail() {
+    // Another tool holding the RSMU mailbox makes the first table read come
+    // back empty, and the source retries at once. On the X870 bench that left
+    // VDDCR_VDD, the rail asked first, as a dash on the Summary while every
+    // other rail read.
+    let runtime = snapshot_runtime();
+    let reads = Arc::new(AtomicUsize::new(0));
+    {
+        let reads = reads.clone();
+        let pm_rails: Vec<(&'static str, f64)> =
+            RAILS.iter().filter(|rail| rail.source == SOURCE_PM_TABLE).map(|rail| (rail.key, 1.25)).collect();
+        *lock(&runtime.sources.voltages) = LiveSource::new(
+            Box::new(move || Ok(if reads.fetch_add(1, Ordering::SeqCst) == 0 { None } else { voltages(&pm_rails) })),
+            Box::new(|_: &Option<SmuVoltages>| String::new()),
+            "Voltages",
+            None,
+            Some(LIVE_CACHE_SECONDS),
+            None,
+            0.0,
+        );
+    }
+    seams::set(
+        "dimm_telemetry",
+        Box::new(Vec::new) as Box<dyn Fn() -> Vec<crate::memory::ddr5_telemetry::DimmTelemetry>>,
+    );
+    let rows = by_name(&voltage_snapshot_rows(&runtime));
+    for rail in RAILS.iter().filter(|rail| rail.source == SOURCE_PM_TABLE) {
+        assert_eq!(value(&rows[format!("{} snapshot", rail.label).as_str()]), "1.250 V", "{}", rail.label);
+    }
+    assert_eq!(reads.load(Ordering::SeqCst), 2, "one lost read, one that answered, then the cache");
 }
 
 #[test]

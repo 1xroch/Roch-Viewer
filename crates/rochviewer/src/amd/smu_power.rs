@@ -144,6 +144,56 @@ pub const CONFIRMED_TEMPERATURE_OFFSETS: &[(&str, u64)] = &[
 pub const TEMPERATURE_MIN_C: f64 = 0.0;
 pub const TEMPERATURE_MAX_C: f64 = 125.0;
 
+/// SVI3 key -> PM-table offset: each rail's current (A) and power (W), HWiNFO's
+/// "(SVI3 TFN)" rows.
+///
+/// Each SVI3 rail is five dwords: two voltages, the current, the power and the
+/// VRM temperature, whose voltage and temperature halves are confirmed above
+/// and in smu_voltages. The current and power were located on the Gigabyte
+/// X870 AORUS TACHYON ICE + Ryzen 7 9850X3D, BIOS F4, the same 0x620105
+/// table, by the table's own arithmetic and against HWiNFO 8.52:
+///
+/// ```text
+///   VDDCR_SOC   1.2800 V x 11.7087 A = 14.9871 W, the dword at 0x0E0
+///   VDD_MISC    1.1000 V x  5.4628 A =  6.0091 W, 0x0F4 holds 6.0090
+///   VDDCR_VDD   0x0C8 follows TDC (0x024) through a one-core load,
+///               16.7 -> 30.4 A against 16.5 -> 29.6
+///   HWiNFO      17.884 A / 24.374 W core, 11.671 A / 14.939 W SoC and
+///               5.479 A MISC, against 17.761 / 24.226, 11.677 / 14.947 and
+///               5.454 read here a few minutes apart, idle both times
+/// ```
+pub const CONFIRMED_SVI3_OFFSETS: &[(&str, u64)] = &[
+    ("vdd_current", 0x0C8),
+    ("vdd_power", 0x0CC),
+    ("soc_current", 0x0DC),
+    ("soc_power", 0x0E0),
+    ("misc_current", 0x0F0),
+    ("misc_power", 0x0F4),
+];
+
+/// A current or power above this is a decode error on a desktop socket.
+pub const SVI3_MAX: f64 = 1000.0;
+
+/// Each core's temperature: one float per core from 0x4F4, eight slots.
+///
+/// Located on the same X870 bench by loading one logical processor at a
+/// time: pinned to CPU 6 only slot 3 climbed (30.3 -> 63.4 C), pinned to
+/// CPU 1 only slot 0, so slot n is core n, and Tctl tracked the loaded slot
+/// within 0.1 C both times. Idle, slot 0 read 30.5 against HWiNFO's "Core
+/// Temperatures" 30.6. A slot past the last core of a six-core part holds
+/// 0.0, so zero is no reading here.
+pub const CORE_TEMPERATURE_OFFSET: u64 = 0x4F4;
+/// Each core's power in watts: one float per core from 0x4B4, the block before
+/// the per-core voltages. Located on the same bench and load: pinned to CPU 6
+/// only slot 3 rose (1.7 -> 15.8 W), pinned to CPU 1 only slot 0. Idle, the
+/// eight read 1.6-2.1 W against HWiNFO's "Core Powers" 1.75 W and the
+/// 1.6-2.0 W the cores' own energy counters give. A slot the part does not
+/// have holds 0.0.
+pub const CORE_POWER_OFFSET: u64 = 0x4B4;
+
+/// The per-core keys, in slot order, as they appear in [`SmuPower::temperatures`].
+pub const CORE_TEMPERATURE_KEYS: [&str; 8] = ["core0", "core1", "core2", "core3", "core4", "core5", "core6", "core7"];
+
 /// Readings keyed by metric or sensor name.
 pub type Readings = BTreeMap<&'static str, f64>;
 
@@ -155,8 +205,66 @@ pub struct SmuPower {
     pub values: Readings,
     /// metric key -> configured limit
     pub limits: Readings,
-    /// sensor key -> degrees Celsius
+    /// sensor key -> degrees Celsius, each core's under [`CORE_TEMPERATURE_KEYS`]
     pub temperatures: Readings,
+    /// SVI3 key -> amperes or watts
+    pub svi3: Readings,
+    /// Each core's watts, under the same slot keys as its temperature
+    pub core_power: Readings,
+}
+
+/// The SVI3 currents and powers, each kept only above zero and inside
+/// [`SVI3_MAX`]: a live rail always draws something, and an unwritten dword
+/// is 0.
+pub fn decode_svi3(read_dword: &dyn Fn(u64) -> HwResult<u32>, base: u64) -> Readings {
+    let mut values = Readings::new();
+    for (key, offset) in CONFIRMED_SVI3_OFFSETS {
+        let Ok(raw) = read_dword(base + offset) else {
+            continue;
+        };
+        let Ok(value) = decode_table_float(raw, "power", true) else {
+            continue;
+        };
+        if value > 0.0 && value <= SVI3_MAX {
+            values.insert(*key, value);
+        }
+    }
+    values
+}
+
+/// Each core slot's power that decodes above zero and inside [`SVI3_MAX`]: a
+/// core that is there always draws something.
+pub fn decode_core_powers(read_dword: &dyn Fn(u64) -> HwResult<u32>, base: u64) -> Readings {
+    let mut values = Readings::new();
+    for (slot, key) in CORE_TEMPERATURE_KEYS.iter().enumerate() {
+        let Ok(raw) = read_dword(base + CORE_POWER_OFFSET + 4 * slot as u64) else {
+            continue;
+        };
+        let Ok(watts) = decode_table_float(raw, "power", true) else {
+            continue;
+        };
+        if watts > 0.0 && watts <= SVI3_MAX {
+            values.insert(*key, watts);
+        }
+    }
+    values
+}
+
+/// Each core slot's temperature that decodes above zero and inside the band.
+pub fn decode_core_temperatures(read_dword: &dyn Fn(u64) -> HwResult<u32>, base: u64) -> Readings {
+    let mut values = Readings::new();
+    for (slot, key) in CORE_TEMPERATURE_KEYS.iter().enumerate() {
+        let Ok(raw) = read_dword(base + CORE_TEMPERATURE_OFFSET + 4 * slot as u64) else {
+            continue;
+        };
+        let Ok(celsius) = decode_table_float(raw, "temperature", true) else {
+            continue;
+        };
+        if celsius > TEMPERATURE_MIN_C && celsius <= TEMPERATURE_MAX_C {
+            values.insert(*key, celsius);
+        }
+    }
+    values
 }
 
 /// Decode one PM-table dword as a little-endian float.
@@ -270,17 +378,22 @@ impl RsmuPowerReader {
                 values.insert("scalar", scalar);
             }
             // Temperatures ride along on the same transfer rather than costing
-            // a second mailbox sequence.
-            Ok((values, limits, decode_temperatures(read_dword, base, None)))
+            // a second mailbox sequence, and so do the per-core ones and SVI3.
+            let mut temperatures = decode_temperatures(read_dword, base, None);
+            temperatures.extend(decode_core_temperatures(read_dword, base));
+            let cores = decode_core_powers(read_dword, base);
+            Ok((values, limits, temperatures, (decode_svi3(read_dword, base), cores)))
         };
 
-        let Some((version, base, (values, limits, temperatures))) = self.read_transferred_table(decode) else {
+        let Some((version, base, (values, limits, temperatures, (svi3, core_power)))) =
+            self.read_transferred_table(decode)
+        else {
             if self.last_error().is_empty() {
                 self.set_last_error("RSMU power read failed".into());
             }
             return None;
         };
-        Some(SmuPower { version, table_base: base, values, limits, temperatures })
+        Some(SmuPower { version, table_base: base, values, limits, temperatures, svi3, core_power })
     }
 
     /// PBO scalar, from the SMU getter rather than the PM table.
@@ -399,6 +512,66 @@ mod tests {
         for (key, _) in CONFIRMED_POWER_OFFSETS {
             assert!(metric_by_key(key).is_some(), "{key}");
         }
+    }
+
+    // -- The SVI3 figures and per-core temperatures, from the X870 bench's
+    //    0x620105 capture.
+
+    fn float(value: f64) -> u32 {
+        (value as f32).to_bits()
+    }
+
+    #[test]
+    fn svi3_figures_are_each_rail_s_current_and_power() {
+        let read = table_reader(&[
+            (0x0C8, float(22.4457)), (0x0CC, float(30.773)),
+            (0x0DC, float(11.7087)), (0x0E0, float(14.9871)),
+            (0x0F0, float(5.4628)), (0x0F4, float(6.009)),
+        ]);
+        let svi3 = decode_svi3(&read, 0);
+        assert_eq!(svi3.len(), 6);
+        assert_almost_equal(svi3["soc_current"], 11.7087, 4);
+        // The arithmetic that placed them: SoC 1.28 V and MISC 1.10 V.
+        assert_almost_equal(1.28 * svi3["soc_current"], svi3["soc_power"], 3);
+        assert_almost_equal(1.10 * svi3["misc_current"], svi3["misc_power"], 3);
+    }
+
+    #[test]
+    fn an_unwritten_or_impossible_svi3_figure_is_dropped() {
+        let read = table_reader(&[(0x0C8, float(0.0)), (0x0CC, float(5000.0)), (0x0DC, float(-1.0))]);
+        assert!(decode_svi3(&read, 0).is_empty());
+    }
+
+    #[test]
+    fn each_core_slot_is_one_core_and_an_absent_core_is_no_reading() {
+        let mut table: Vec<(u64, u32)> = [30.5326, 36.5891, 31.175, 31.7098, 31.3772, 31.0511]
+            .iter()
+            .enumerate()
+            .map(|(slot, celsius)| (CORE_TEMPERATURE_OFFSET + 4 * slot as u64, float(*celsius)))
+            .collect();
+        // A six-core part: the last two slots hold zero.
+        table.push((CORE_TEMPERATURE_OFFSET + 24, 0));
+        table.push((CORE_TEMPERATURE_OFFSET + 28, 0));
+        let temperatures = decode_core_temperatures(&table_reader(&table), 0);
+        assert_eq!(temperatures.keys().copied().collect::<Vec<_>>(), &CORE_TEMPERATURE_KEYS[..6]);
+        assert_almost_equal(temperatures["core1"], 36.5891, 4);
+    }
+
+    #[test]
+    fn each_core_s_power_is_its_own_slot() {
+        let mut table: Vec<(u64, u32)> = [1.8642, 5.4927, 2.0821, 2.1446, 2.2996, 1.9294]
+            .iter()
+            .enumerate()
+            .map(|(slot, watts)| (CORE_POWER_OFFSET + 4 * slot as u64, float(*watts)))
+            .collect();
+        table.push((CORE_POWER_OFFSET + 24, 0));
+        table.push((CORE_POWER_OFFSET + 28, float(5000.0)));
+        let powers = decode_core_powers(&table_reader(&table), 0);
+        assert_eq!(powers.keys().copied().collect::<Vec<_>>(), &CORE_TEMPERATURE_KEYS[..6]);
+        assert_almost_equal(powers["core1"], 5.4927, 4);
+        // The block sits right before the voltages, which sit right before the temperatures.
+        assert_eq!(CORE_POWER_OFFSET + 0x20, 0x4D4);
+        assert_eq!(CORE_POWER_OFFSET + 0x40, CORE_TEMPERATURE_OFFSET);
     }
 
     #[test]

@@ -1,6 +1,12 @@
 # Changelog
 
-## 1.1.2 (2026-11-05)
+## Unreleased
+
+- AM5 Telemetry: each core's temperature, folded under the hottest (Core Temp (max)), each core's power, folded under their sum (Core Power (sum)), and the SVI3 rails' current and power (VDDCR_VDD, VDDCR_SOC, VDD_MISC and their sum), read from the same PM-table transfer as the rows already there. Located on the X870 AORUS TACHYON ICE with a Ryzen 7 9850X3D by the table's own arithmetic (each rail's power is its voltage times its current) and by loading one core at a time, and checked against HWiNFO 8.52's "(SVI3 TFN)" and "Core Temperatures" rows. A six-core part's two empty slots stay hidden.
+- X870 AORUS TACHYON ICE: the IT8696E's two remaining CPU rails are shown as CPU VCORE SoC (board) and CPU VCORE MISC (board), the names HWiNFO 8.52 gives them, with the SMU's own VDDCR_SOC and VDD_MISC telemetry agreeing on which is which.
+- AM5: AGESA no longer shows an older version on some launches. The version is scanned out of RAM, and a stray unmarked "ComboAm5PI 1.0.0.7b" lower in the window won over the BIOS's own marked "ComboAm5PI 1.2.0.3e Patch A"; a marked string anywhere in the window now wins.
+- Radeon telemetry: the GPU rows read again on machines where ADL lists outputs that refuse the sensor query ahead of the ones that answer. Only the first listed output was asked, which on the X870 bench's RX 9070 XT (driver 26.10.2) left every GPU row blank; each output is now tried in turn.
+- AM5: the Summary's VDDCR_VDD no longer stays a dash when the first PM-table read loses the SMU mailbox to another tool (HWiNFO, Roch Monitor) at startup. Every rail of the voltage snapshot now waits for the one table read they share.
 
 - Linux: the same window and readings as on Windows, on Wayland and X11, with no driver to fetch. A small helper reads the registers as root and the window stays an ordinary process; `pkexec` asks at each launch, or `rochviewer setup` stops it asking. Verified on a Z890 AORUS TACHYON ICE with a Core Ultra 7 270K Plus and two RX 7900 XTs; other platforms have not been run on hardware yet. See [docs/linux.md](docs/linux.md).
 - Linux: a release package to download. Unpack it and `./rochviewer install` adds it to your launcher for one user, with no Rust needed; `cargo xtask install` does the same from source. `rochviewer dump` writes every row as JSON.

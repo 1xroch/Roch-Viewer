@@ -90,9 +90,13 @@ pub fn read_board_rails() -> BTreeMap<&'static str, f64> {
 // 167 x x1.65 = 3.307 against 3.307, 3VSB, VBAT and AVCC3 x2 = 3.336, 3.048
 // and 3.072 exactly, +5V 161 x x2.5 = 4.830 against 4.860 a moment apart.
 //
-// 0x24 (1.272 V) and 0x25 (1.116 V) are left out. The reference names them
-// "iGPU VAXG" and "CPU VCCIN_AUX", Intel rails an AM5 board does not have,
-// and naming them properly needs a BIOS change to see which one moves.
+// 0x24 (1.272 V) and 0x25 (1.116 V) were left out at first: the reference
+// then named them "iGPU VAXG" and "CPU VCCIN_AUX", Intel rails an AM5 board
+// does not have. HWiNFO 8.52 names them for this board, CPU VCORE SoC and
+// CPU VCORE MISC, read on the same boot at 106 and 93 counts exactly, and the
+// SMU's own SVI3 telemetry agrees on which is which: VDDCR_SOC 1.280 V and
+// VDD_MISC 1.100 V, the board measuring each 8 and 16 mV off, after its own
+// drop. Nothing else on the chip is near either value.
 
 /// One board supply: (key, label, register, divider, plausible band in volts).
 pub type BoardVoltage = (&'static str, &'static str, u8, f64, (f64, f64));
@@ -100,6 +104,8 @@ pub type BoardVoltage = (&'static str, &'static str, u8, f64, (f64, f64));
 /// (key, label, register, divider, plausible band in volts)
 pub const BOARD_VOLTAGES: &[BoardVoltage] = &[
     ("board_vcore", "Vcore (board)", 0x20, 1.0, (0.3, 1.8)),
+    ("board_vcore_soc", "CPU VCORE SoC (board)", 0x24, 1.0, (0.6, 1.5)),
+    ("board_vcore_misc", "CPU VCORE MISC (board)", 0x25, 1.0, (0.6, 1.5)),
     ("plus12v", "+12V", 0x22, 6.0, (10.8, 13.2)),
     ("plus5v", "+5V", 0x23, 2.5, (4.5, 5.5)),
     ("plus3v3", "+3.3V", 0x21, 1.65, (3.0, 3.6)),
@@ -230,7 +236,7 @@ mod tests {
 
     // The bench's IT8696E, as read beside a reference tool: raw counts per register.
     const BENCH_REGISTERS: &[(u8, u8)] = &[
-        (0x20, 102), (0x21, 167), (0x22, 168), (0x23, 161), (0x27, 139), (0x28, 127),
+        (0x20, 102), (0x21, 167), (0x22, 168), (0x23, 161), (0x24, 106), (0x25, 93), (0x27, 139), (0x28, 127),
         (0x2F, 128), (0x2A, 37), (0x2C, 34),
         (0x0D, 225), (0x18, 1), // CPU Fan: 481 counts
         (0x82, 185), (0x83, 0), // CPU_OPT: 185 counts
@@ -278,6 +284,8 @@ mod tests {
         assert_close(found["vbat"], 3.048);
         assert_close(found["avcc3"], 3.072);
         assert_close(found["board_vcore"], 1.224);
+        assert_close(found["board_vcore_soc"], 1.272);
+        assert_close(found["board_vcore_misc"], 1.116);
         assert_eq!((found["cpu_fan"], found["cpu_opt"]), (1403.0, 3649.0));
         assert_eq!((found["pch"], found["pciex16"]), (37.0, 34.0));
     }
@@ -350,10 +358,17 @@ mod tests {
     }
 
     #[test]
-    fn the_two_intel_named_channels_are_not_claimed() {
-        let registers: Vec<u8> = BOARD_VOLTAGES.iter().map(|v| v.2).collect();
-        assert!(!registers.contains(&0x24));
-        assert!(!registers.contains(&0x25));
+    fn the_two_cpu_rails_carry_amd_names_not_intel_ones() {
+        let label = |register: u8| BOARD_VOLTAGES.iter().find(|v| v.2 == register).map(|v| v.1);
+        assert_eq!(label(0x24), Some("CPU VCORE SoC (board)"));
+        assert_eq!(label(0x25), Some("CPU VCORE MISC (board)"));
+        for (_key, label, ..) in BOARD_VOLTAGES {
+            for intel in ["VAXG", "VCCIN_AUX", "VCCSA", "VNNAON"] {
+                assert!(!label.contains(intel), "{label}");
+            }
+        }
+        // 0x26 stays the memory controller's VDDIO, read by read_board_rails.
+        assert!(label(0x26).is_none());
     }
 
     // == tests/test_tachyon_readings.py -----------------------------------

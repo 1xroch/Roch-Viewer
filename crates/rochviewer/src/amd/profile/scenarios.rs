@@ -17,7 +17,7 @@
 
 use serde_json::Value as Json;
 
-use super::parity::{dump_row, stub_with_status};
+use super::parity::{dump_row, is_newer_than_the_python, stub_with_status};
 use super::*;
 use crate::gpu::radeon::RadeonGpu;
 use crate::memory::ddr5_telemetry::{DimmTelemetry, PmicTelemetry};
@@ -371,6 +371,9 @@ fn stub_sources(runtime: &Am5Runtime, json: &Json) {
             values: readings(&power["values"]),
             limits: readings(&power["limits"]),
             temperatures: readings(&power["temperatures"]),
+            // Captured before the SVI3 rows existed: absent there, empty here.
+            svi3: power.get("svi3").map(readings).unwrap_or_default(),
+            core_power: power.get("core_power").map(readings).unwrap_or_default(),
         }),
     );
     stub_with_status(&sources.dram, readings(&json["dram"]));
@@ -388,7 +391,8 @@ fn check(scenario: &str) {
     install_wmi(&inputs["wmi"]);
     install_seams(&inputs["seams"]);
     let runtime = runtime_for(inputs);
-    let rows: Vec<Json> = build_timings_with(&runtime).iter().map(dump_row).collect();
+    let rows: Vec<Json> =
+        build_timings_with(&runtime).iter().filter(|row| !is_newer_than_the_python(&row.name)).map(dump_row).collect();
     let python = expected["rows"].as_array().unwrap();
 
     let mut problems = Vec::new();

@@ -25,6 +25,37 @@ use crate::wmi_util::{FakeWmi, WmiObject};
 
 const FIXTURE: &str = include_str!("parity/am5_profile_parity.json");
 
+/// Rows added after the Python 1.1.0 these fixtures were captured from, left
+/// out of the comparison so every row the Python had is still held to it
+/// exactly. Each was confirmed on hardware instead: the per-core temperatures
+/// and the SVI3 currents and powers on the X870 bench against HWiNFO 8.52
+/// (smu_power's CONFIRMED_SVI3_OFFSETS and CORE_TEMPERATURE_OFFSET), the two
+/// board rails likewise (am5_board_rails).
+pub(super) fn is_newer_than_the_python(name: &str) -> bool {
+    let per_core = |suffix: &str| {
+        let core = name.strip_prefix("Core ").and_then(|rest| rest.strip_suffix(suffix));
+        core.is_some_and(|n| n.parse::<u8>().is_ok())
+    };
+    per_core(" Temp")
+        || per_core(" Power")
+        || name == CORE_TEMPERATURE_ROW
+        || name == CORE_POWER_ROW
+        || name == SVI3_TOTAL_ROW
+        || SVI3_ROWS.iter().any(|(label, ..)| *label == name)
+        || ["CPU VCORE SoC (board)", "CPU VCORE MISC (board)"].contains(&name)
+}
+
+#[test]
+fn only_the_rows_added_since_the_python_are_left_out() {
+    let newer = ["Core Temp (max)", "Core 0 Temp", "Core 7 Temp", "VDDCR_SOC Current", "VDD + SOC + MISC Power"];
+    for name in newer.into_iter().chain(["CPU VCORE MISC (board)", "Core Power (sum)", "Core 5 Power"]) {
+        assert!(is_newer_than_the_python(name), "{name}");
+    }
+    for name in ["CPU Temp", "L3 Temp", "PPT", "Vcore (board)", "Core Temp", "Core X Temp", "System Temp"] {
+        assert!(!is_newer_than_the_python(name), "{name}");
+    }
+}
+
 fn fixture() -> Json {
     serde_json::from_str(FIXTURE).expect("the parity fixture parses")
 }
@@ -328,6 +359,8 @@ fn stub_sources(runtime: &Am5Runtime, scenario: &str) {
                 ("soc_vrm", 44.25),
                 ("misc_vrm", 41.0),
             ]),
+            svi3: BTreeMap::new(),
+            core_power: BTreeMap::new(),
         }),
     );
     stub_with_status(&sources.dram, Readings::from([("dram_vdd", 1.4), ("dram_vddq", 1.39), ("dram_vpp", 1.8)]));
@@ -426,7 +459,8 @@ fn check_scenario(scenario: &str) {
     install_wmi(scenario);
     install_seams(scenario);
     let runtime = runtime_for(scenario, &fixture["inputs"]);
-    let rows: Vec<Json> = build_timings_with(&runtime).iter().map(dump_row).collect();
+    let rows: Vec<Json> =
+        build_timings_with(&runtime).iter().filter(|row| !is_newer_than_the_python(&row.name)).map(dump_row).collect();
     let python = expected["rows"].as_array().unwrap();
 
     let mut problems = Vec::new();

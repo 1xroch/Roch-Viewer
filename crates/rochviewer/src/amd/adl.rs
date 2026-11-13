@@ -254,7 +254,11 @@ pub fn vram_vendor(code: Option<i32>) -> Option<String> {
 ///
 /// Keyed on the PCI location when one is given, so the right adapter is
 /// asked on a machine with more than one. ADL lists an entry per display
-/// output, so several share a location and the first is enough.
+/// output, and `work` is tried on each in ADL's order until one answers: not
+/// every entry answers every query. On the X870 bench (RX 9070 XT, driver
+/// 26.10.2) indices 0 and 1 refused ADL2_New_QueryPMLogData_Get with
+/// ADL_ERR_NOT_SUPPORTED while 2 to 6 answered, and asking only the first
+/// left every GPU row blank.
 ///
 /// Shared because both readers need the same six calls of boilerplate, and
 /// the one that matters is the last: the context is destroyed whatever
@@ -262,7 +266,7 @@ pub fn vram_vendor(code: Option<i32>) -> Option<String> {
 /// time it is retried.
 fn with_adapter<T>(
     location: Option<PciLocation>,
-    work: impl FnOnce(&AdlApi, Context, i32) -> Option<T>,
+    mut work: impl FnMut(&AdlApi, Context, i32) -> Option<T>,
 ) -> Option<T> {
     let api = load_adl()?;
 
@@ -274,7 +278,7 @@ fn with_adapter<T>(
         return None;
     }
 
-    let result = find_adapter(&api, context, location).and_then(|index| work(&api, context, index));
+    let result = find_adapters(&api, context, location).into_iter().find_map(|index| work(&api, context, index));
 
     if let Some(destroy) = api.main_control_destroy {
         // SAFETY: the context was created above and is destroyed once.
@@ -285,27 +289,31 @@ fn with_adapter<T>(
     result
 }
 
-/// The ADL adapter index of the first existing adapter at `location` (or
-/// anywhere, without one).
-fn find_adapter(api: &AdlApi, context: Context, location: Option<PciLocation>) -> Option<i32> {
+/// The ADL adapter index of every existing adapter at `location` (or
+/// anywhere, without one), in ADL's order.
+fn find_adapters(api: &AdlApi, context: Context, location: Option<PciLocation>) -> Vec<i32> {
     let mut count = 0i32;
-    let number_of_adapters = api.number_of_adapters_get?;
+    let Some(number_of_adapters) = api.number_of_adapters_get else {
+        return Vec::new();
+    };
     // SAFETY: a live context and a live out parameter.
     if unsafe { number_of_adapters(context, &mut count) } != ADL_OK || count <= 0 {
-        return None;
+        return Vec::new();
     }
     let mut adapters: Vec<AdapterInfo> = (0..count).map(|_| zeroed()).collect();
-    let adapter_info = api.adapter_info_get?;
+    let Some(adapter_info) = api.adapter_info_get else {
+        return Vec::new();
+    };
     let size = std::mem::size_of::<AdapterInfo>() as i32 * count;
     // SAFETY: `adapters` holds `count` structures, `size` bytes in all,
     // which is the input size the call is told.
     if unsafe { adapter_info(context, adapters.as_mut_ptr(), size) } != ADL_OK {
-        return None;
+        return Vec::new();
     }
     adapters
         .iter()
         .filter(|adapter| adapter.i_exist != 0)
-        .find(|adapter| match location {
+        .filter(|adapter| match location {
             Some((bus, device, function)) => {
                 adapter.i_bus_number == bus as i32
                     && adapter.i_device_number == device as i32
@@ -314,6 +322,7 @@ fn find_adapter(api: &AdlApi, context: Context, location: Option<PciLocation>) -
             None => true,
         })
         .map(|adapter| adapter.i_adapter_index)
+        .collect()
 }
 
 /// What ADL knows about the card's memory. Every field is optional.
@@ -635,5 +644,32 @@ mod tests {
         assert_eq!(sensors["GPU Core Voltage"], "0.749 V");
         assert_eq!(sensors["GPU Board Power (TBP)"], "363 W");
         assert!(!sensors.contains_key("GPU Temperature"));
+    }
+
+    unsafe extern "C" fn fake_pmlog_refusing_the_first(context: Context, index: i32, data: *mut PMLogDataOutput) -> i32 {
+        ASKED.with(|asked| asked.borrow_mut().push(index));
+        if index == 7 {
+            return -8; // ADL_ERR_NOT_SUPPORTED
+        }
+        // SAFETY: passed straight through from the caller.
+        unsafe { fake_pmlog(context, index, data) }
+    }
+
+    #[test]
+    fn an_output_that_refuses_the_sensor_query_is_passed_over() {
+        // The X870 bench: ADL lists outputs whose sensor query answers
+        // ADL_ERR_NOT_SUPPORTED ahead of the ones that answer, and taking the
+        // first left every GPU row blank.
+        fake_driver();
+        TEST_ADL.with(|slot| {
+            let mut api = slot.take().unwrap();
+            api.new_query_pmlog_data_get = Some(fake_pmlog_refusing_the_first);
+            slot.set(Some(api));
+        });
+        ASKED.with(|asked| asked.borrow_mut().clear());
+        let sensors = read_sensors(None);
+        assert_eq!(sensors["GPU Fan"], "1825 RPM");
+        assert_eq!(ASKED.with(|asked| asked.borrow().clone()), vec![7, 8]);
+        assert_eq!(DESTROYED.with(Cell::get), 1, "one context for the whole walk, destroyed once");
     }
 }

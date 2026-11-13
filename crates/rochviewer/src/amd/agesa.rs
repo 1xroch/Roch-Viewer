@@ -78,9 +78,12 @@ fn find_bytes(haystack: &[u8], needle: &[u8], start: usize) -> Option<usize> {
 
 /// The first AGESA version string found in `blob`, or "".
 pub fn parse_agesa_version(blob: &[u8]) -> String {
-    if blob.is_empty() {
-        return String::new();
-    }
+    let version = parse_marked_version(blob);
+    if version.is_empty() { parse_unmarked_version(blob) } else { version }
+}
+
+/// The version after the first `AGESA!` marker in `blob` that carries one.
+fn parse_marked_version(blob: &[u8]) -> String {
     for marker in AGESA_MARKERS {
         let mut start = 0;
         while let Some(index) = find_bytes(blob, marker, start) {
@@ -91,7 +94,14 @@ pub fn parse_agesa_version(blob: &[u8]) -> String {
             start = index + 1;
         }
     }
-    // Fallback: some dumps expose the PI name without the AGESA! prefix.
+    String::new()
+}
+
+/// Fallback: some dumps expose the PI name without the AGESA! prefix.
+fn parse_unmarked_version(blob: &[u8]) -> String {
+    if blob.is_empty() {
+        return String::new();
+    }
     let text: String = blob.iter().map(|byte| *byte as char).collect();
     if let Some(found) = FALLBACK_RE.captures(&text).and_then(|captures| captures.get(1)) {
         return found.as_str().trim_matches(is_py_space).to_string();
@@ -136,6 +146,13 @@ fn extract_version(blob: &[u8], offset: usize) -> String {
 }
 
 /// Scan physical memory via `read_chunk(addr, size) -> Option<bytes>`.
+///
+/// A version after an `AGESA!` marker anywhere in the window wins over a bare
+/// PI name, which is only the answer when no chunk has a marker at all. The
+/// window is ordinary RAM: on the X870 bench it held one `AGESA!V9` marker
+/// (ComboAm5PI 1.2.0.3e Patch A, the BIOS's own) and, in an earlier chunk on
+/// some boots, a stray unmarked "ComboAm5PI 1.0.0.7b". Taking the first match
+/// chunk by chunk showed the stray one whenever it landed below the marker.
 pub fn find_agesa_version(
     mut read_chunk: impl FnMut(u64, usize) -> Option<Vec<u8>>,
     start: u64,
@@ -145,20 +162,24 @@ pub fn find_agesa_version(
     if end <= start || chunk_size == 0 {
         return String::new();
     }
+    let mut unmarked = String::new();
     let mut addr = start;
     while addr < end {
         let size = (chunk_size as u64).min(end - addr) as usize;
         if let Some(blob) = read_chunk(addr, size)
             && !blob.is_empty()
         {
-            let version = parse_agesa_version(&blob);
+            let version = parse_marked_version(&blob);
             if !version.is_empty() {
                 return version;
+            }
+            if unmarked.is_empty() {
+                unmarked = parse_unmarked_version(&blob);
             }
         }
         addr += size as u64;
     }
-    String::new()
+    unmarked
 }
 
 /// Live helper using the driver's MapPhysToLin path, over the default window.
@@ -198,6 +219,32 @@ mod tests {
     fn fallback_finds_the_pi_name_without_a_marker() {
         let blob = b"\x00\x00combo am5pi\x00ComboAm5PI\xA01.2.0.3\x00";
         assert_eq!(parse_agesa_version(blob), "ComboAm5PI\u{A0}1.2.0.3");
+    }
+
+    #[test]
+    fn a_marker_in_a_later_chunk_beats_a_bare_name_in_an_earlier_one() {
+        // The X870 bench: a stray unmarked PI name low in the window, the
+        // BIOS's marked string further up.
+        let reader = |addr: u64, size: usize| {
+            let mut chunk = vec![0u8; size];
+            let text: &[u8] = match addr {
+                0x0900_0000 => b"\x00ComboAm5PI 1.0.0.7b\x00",
+                0x0900_0200 => b"AGESA!V9\x00ComboAm5PI 1.2.0.3e Patch A\x00",
+                _ => b"",
+            };
+            chunk[16..16 + text.len()].copy_from_slice(text);
+            Some(chunk)
+        };
+        assert_eq!(find_agesa_version(reader, 0x0900_0000, 0x0900_0400, 0x100), "ComboAm5PI 1.2.0.3e Patch A");
+        // With no marker anywhere, the bare name is still the answer.
+        let unmarked = |addr: u64, size: usize| {
+            let mut chunk = vec![0u8; size];
+            if addr == 0x0900_0100 {
+                chunk[..20].copy_from_slice(b"\x00ComboAm5PI 1.0.0.7b");
+            }
+            Some(chunk)
+        };
+        assert_eq!(find_agesa_version(unmarked, 0x0900_0000, 0x0900_0400, 0x100), "ComboAm5PI 1.0.0.7b");
     }
 
     #[test]

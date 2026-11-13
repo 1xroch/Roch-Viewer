@@ -55,7 +55,7 @@ use crate::amd::power_metrics::{METRICS, format_power, metric_by_key};
 use crate::amd::smn::SmnTransport;
 use crate::amd::smn_mcfg::McfgSmnReader;
 use crate::amd::smu_clocks::SmuClocks;
-use crate::amd::smu_power::SmuPower;
+use crate::amd::smu_power::{CORE_TEMPERATURE_KEYS, SmuPower};
 use crate::amd::smu_voltages::SmuVoltages;
 use crate::amd::timings::{ALL_OFFSETS, DecodedChannel, Registers, UMC_BASES, UmcValue, decode_channel};
 use crate::hardware::driver_path::DLL_NAME;
@@ -2377,6 +2377,18 @@ fn voltage_snapshot_rows(runtime: &Arc<Am5Runtime>) -> Vec<Row> {
             if let Some(found) = slot.as_ref() {
                 return found.clone();
             }
+            // Every CPU rail below comes from one PM-table read, so let that
+            // read answer before any rail is formatted. The source retries at
+            // once, and asked rail by rail, a read that lost the mailbox to
+            // another tool (HWiNFO, Roch Monitor) blanked only the rail asked
+            // first: VDDCR_VDD, which the Summary then kept as a dash until
+            // the Voltages tab was opened. Within the source's own attempt
+            // limit, and nothing at all once it has read.
+            for _ in 0..LAZY_READ_ATTEMPTS {
+                if runtime.voltages().is_some() {
+                    break;
+                }
+            }
             let mut values = BTreeMap::new();
             for rail in RAILS {
                 if !PER_MODULE_RAILS.contains(&rail.key) {
@@ -2907,7 +2919,7 @@ fn temperature_rows(runtime: &Arc<Am5Runtime>) -> Vec<Row> {
     let sensor = |name: &str, value: Getter| {
         live(make_row(name, lazy(value), THERMAL_POWER_CATEGORY, SENSOR_TAB, "Right"))
     };
-    vec![
+    let mut rows = vec![
         // Tctl and the limit it is measured against, in one row: the separate
         // "Thermal Limit" row that used to sit below the budgets repeated this
         // temperature verbatim and added only the limit.
@@ -2925,12 +2937,86 @@ fn temperature_rows(runtime: &Arc<Am5Runtime>) -> Vec<Row> {
         sensor("VDDCR_VDD VRM", temperature(runtime, "vdd_vrm")),
         sensor("VDDCR_SOC VRM", temperature(runtime, "soc_vrm")),
         sensor("VDD_MISC VRM", temperature(runtime, "misc_vrm")),
-    ]
+    ];
+    rows.extend(core_temperature_rows(runtime));
+    rows
 }
 
-/// Build the Power Limits rows: the ZenStates limits, read-only.
+/// The parent row the per-core temperatures fold under.
+pub const CORE_TEMPERATURE_ROW: &str = "Core Temp (max)";
+
+/// The hottest core, and one row per core folded under it.
+///
+/// The parent reads the hottest slot rather than an average because that is
+/// the core a cooler and a curve-optimizer offset are judged by. A slot the
+/// part does not have (a six-core part's last two) reads nothing and its row
+/// stays hidden.
+fn core_temperature_rows(runtime: &Arc<Am5Runtime>) -> Vec<Row> {
+    let hottest = {
+        let runtime = runtime.clone();
+        getter(move || {
+            let Some(power) = runtime.power() else {
+                return EM_DASH.into();
+            };
+            CORE_TEMPERATURE_KEYS
+                .iter()
+                .filter_map(|key| power.temperatures.get(key).copied())
+                .reduce(f64::max)
+                .map_or_else(|| EM_DASH.into(), |celsius| format!("{:.1} °C", FloatText(celsius)))
+        })
+    };
+    let mut rows =
+        vec![live(make_row(CORE_TEMPERATURE_ROW, lazy(hottest), THERMAL_POWER_CATEGORY, SENSOR_TAB, "Right"))];
+    rows.extend(CORE_TEMPERATURE_KEYS.iter().enumerate().map(|(core, key)| {
+        let row = make_row(
+            &format!("Core {core} Temp"),
+            lazy(temperature(runtime, key)),
+            THERMAL_POWER_CATEGORY,
+            SENSOR_TAB,
+            "Right",
+        );
+        flag(live(row).with_extra(PARENT_ROW_KEY, Extra::Str(CORE_TEMPERATURE_ROW.into())), "hide_when_blank")
+    }));
+    rows
+}
+
+/// SVI3 rows: (label, key, unit), the currents then the powers, as HWiNFO's
+/// "(SVI3 TFN)" rows read.
+pub const SVI3_ROWS: &[(&str, &str, &str)] = &[
+    ("VDDCR_VDD Current", "vdd_current", "A"),
+    ("VDDCR_SOC Current", "soc_current", "A"),
+    ("VDD_MISC Current", "misc_current", "A"),
+    ("VDDCR_VDD Power", "vdd_power", "W"),
+    ("VDDCR_SOC Power", "soc_power", "W"),
+    ("VDD_MISC Power", "misc_power", "W"),
+];
+
+/// The row summing the three SVI3 rail powers.
+pub const SVI3_TOTAL_ROW: &str = "VDD + SOC + MISC Power";
+
+fn svi3_reading(runtime: &Arc<Am5Runtime>, key: &'static str, unit: &'static str) -> Getter {
+    let runtime = runtime.clone();
+    getter(move || match runtime.power().and_then(|power| power.svi3.get(key).copied()) {
+        None => EM_DASH.into(),
+        Some(value) => format!("{:.3} {unit}", FloatText(value)),
+    })
+}
+
+/// The three rail powers summed, only when all three answered.
+fn svi3_total(runtime: &Arc<Am5Runtime>) -> Getter {
+    let runtime = runtime.clone();
+    getter(move || {
+        let total = runtime.power().and_then(|power| {
+            ["vdd_power", "soc_power", "misc_power"].iter().map(|key| power.svi3.get(key).copied()).sum::<Option<f64>>()
+        });
+        total.map_or_else(|| EM_DASH.into(), |watts| format!("{:.3} W", FloatText(watts)))
+    })
+}
+
+/// Build the Power Limits rows: the ZenStates limits, read-only, then what
+/// each SVI3 rail is carrying.
 fn power_rows(runtime: &Arc<Am5Runtime>) -> Vec<Row> {
-    METRICS
+    let mut rows: Vec<Row> = METRICS
         .iter()
         // Scalar is on Misc instead. It has no live half to pair with -- it
         // is a setting, and this window is for readings that move -- and two
@@ -2948,7 +3034,45 @@ fn power_rows(runtime: &Arc<Am5Runtime>) -> Vec<Row> {
         })
         // The thermal budget is not appended here: CPU Temp already reads Tctl
         // against its limit, in the same value-against-limit shape.
-        .collect()
+        .collect();
+    rows.extend(SVI3_ROWS.iter().map(|&(label, key, unit)| {
+        live(make_row(label, lazy(svi3_reading(runtime, key, unit)), THERMAL_POWER_CATEGORY, SENSOR_TAB, "Right"))
+    }));
+    rows.push(live(make_row(SVI3_TOTAL_ROW, lazy(svi3_total(runtime)), THERMAL_POWER_CATEGORY, SENSOR_TAB, "Right")));
+    rows.extend(core_power_rows(runtime));
+    rows
+}
+
+/// The parent row the per-core powers fold under.
+pub const CORE_POWER_ROW: &str = "Core Power (sum)";
+
+/// The cores' powers summed, and one row per core folded under it. A slot the
+/// part does not have reads nothing and its row stays hidden.
+fn core_power_rows(runtime: &Arc<Am5Runtime>) -> Vec<Row> {
+    let total = {
+        let runtime = runtime.clone();
+        getter(move || {
+            let Some(power) = runtime.power() else {
+                return EM_DASH.into();
+            };
+            let watts: Vec<f64> =
+                CORE_TEMPERATURE_KEYS.iter().filter_map(|key| power.core_power.get(key).copied()).collect();
+            if watts.is_empty() { EM_DASH.into() } else { format!("{:.3} W", FloatText(watts.iter().sum::<f64>())) }
+        })
+    };
+    let mut rows = vec![live(make_row(CORE_POWER_ROW, lazy(total), THERMAL_POWER_CATEGORY, SENSOR_TAB, "Right"))];
+    rows.extend(CORE_TEMPERATURE_KEYS.iter().enumerate().map(|(core, key)| {
+        let watts = {
+            let runtime = runtime.clone();
+            getter(move || match runtime.power().and_then(|power| power.core_power.get(key).copied()) {
+                None => EM_DASH.into(),
+                Some(watts) => format!("{:.3} W", FloatText(watts)),
+            })
+        };
+        let row = make_row(&format!("Core {core} Power"), lazy(watts), THERMAL_POWER_CATEGORY, SENSOR_TAB, "Right");
+        flag(live(row).with_extra(PARENT_ROW_KEY, Extra::Str(CORE_POWER_ROW.into())), "hide_when_blank")
+    }));
+    rows
 }
 
 // The System Info tab, in sections, laid out the way the Intel tab is: machine
