@@ -20,7 +20,7 @@ On Linux, every platform builds and passes its tests, but only LGA1851 has been 
 
 No driver to fetch, and no Rust needed. It needs glibc 2.35 or newer, which means Ubuntu 22.04, Debian 12, Fedora 36 or anything since.
 
-1. Download `RochViewer-1.1.2-linux-x86_64.tar.gz` from [Releases](https://github.com/RochStudio/Roch-Viewer/releases/latest) and unpack it.
+1. Download `RochViewer-1.1.2-linux-x86_64.tar.gz` from [Releases](https://github.com/1xroch/Roch-Viewer/releases/latest) and unpack it.
 2. In the folder it unpacks to, run `./rochviewer install`. That adds it to your launcher and to `~/.local/bin`.
 3. Open the viewer and accept the password prompt.
 
@@ -30,7 +30,7 @@ See the [Linux guide](docs/linux.md) for how to stop being asked, what differs f
 
 Windows 10/11 x64. No Python, .NET or Rust installation needed to run.
 
-1. Download `RochViewer.exe` from [Releases](https://github.com/RochStudio/Roch-Viewer/releases/latest).
+1. Download `RochViewer.exe` from [Releases](https://github.com/1xroch/Roch-Viewer/releases/latest).
 2. Place the separately obtained [inpoutx64.dll](https://www.highrez.co.uk/downloads/inpout32/) beside `RochViewer.exe`.
 3. Open the viewer and accept the administrator prompt.
 

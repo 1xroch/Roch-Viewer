@@ -8,7 +8,7 @@ Verified on a Gigabyte Z890 AORUS TACHYON ICE with a Core Ultra 7 270K Plus, DDR
 
 ## Install
 
-**From a release.** Download `RochViewer-<version>-linux-x86_64.tar.gz` from [Releases](https://github.com/RochStudio/Roch-Viewer/releases/latest), unpack it, and in the folder it unpacks to run:
+**From a release.** Download `RochViewer-<version>-linux-x86_64.tar.gz` from [Releases](https://github.com/1xroch/Roch-Viewer/releases/latest), unpack it, and in the folder it unpacks to run:
 
 ```bash
 ./rochviewer install

@@ -15,7 +15,7 @@ value it was told to expect.
 
 A built `RochViewer.exe` is attached to every release:
 
-**https://github.com/RochStudio/Roch-Viewer/releases**
+**https://github.com/1xroch/Roch-Viewer/releases**
 
 It needs one file that is deliberately not in the download — see
 [Prerequisites](#prerequisites). Building it yourself is a few sections below.
@@ -210,7 +210,7 @@ There are two ways in. Both need the driver, and both need Administrator.
 ### The quick way: the released EXE
 
 1. **Download `RochViewer.exe`** from the
-   [releases page](https://github.com/RochStudio/Roch-Viewer/releases).
+   [releases page](https://github.com/1xroch/Roch-Viewer/releases).
    Nothing to install; it is a single file.
 2. **Get the driver.** Download the InpOut32/64 binaries from
    [highrez.co.uk](http://www.highrez.co.uk/downloads/inpout32/) — the
@@ -238,7 +238,7 @@ step 2 or 3 did not take. The strip names the folders it looked in.
 2. **Get the code.**
 
    ```
-   git clone https://github.com/RochStudio/Roch-Viewer.git
+   git clone https://github.com/1xroch/Roch-Viewer.git
    cd Roch-Viewer
    ```
 
