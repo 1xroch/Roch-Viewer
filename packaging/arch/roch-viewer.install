@@ -1,0 +1,17 @@
+# This only prints. `rochviewer setup` gives a helper copy the capabilities it needs to read the
+# memory controller, for one user's group, so whoever installs this runs it themselves.
+
+post_install() {
+  cat <<'END'
+Roch Viewer asks for your password through pkexec each time it opens. To stop that, once:
+  sudo rochviewer setup
+END
+}
+
+post_upgrade() {
+  # The helper is a copy, so an update leaves it at the old version and the viewer asks again.
+  if [ -e /usr/local/libexec/rochviewer-helper ]; then
+    echo "Run 'sudo rochviewer setup' again so its helper matches this version."
+  fi
+  return 0
+}

@@ -1,0 +1,40 @@
+# Maintainer: Roch Studio <300260898+1xroch@users.noreply.github.com>
+
+# Installs the binary published with a release: nothing is compiled, so no Rust toolchain is needed.
+# The launcher entry and the icon are written by the program itself (`rochviewer install`), so they
+# are the ones a home install gets. It never runs `rochviewer setup`.
+
+pkgname=roch-viewer-bin
+pkgver=1.1.2
+pkgrel=1
+pkgdesc='Memory timings, hardware details and live telemetry, read from the memory controller'
+arch=(x86_64)
+url='https://github.com/1xroch/Roch-Viewer'
+license=(GPL-3.0-or-later)
+depends=(glibc libgcc hicolor-icon-theme polkit)
+optdepends=(
+  'libglvnd: the window'
+  'libxkbcommon: the window'
+  'wayland: the window on Wayland'
+  'libx11: the window on X11'
+  'libxcursor: the window on X11'
+  'libxi: the window on X11'
+  'libxkbcommon-x11: the window on X11'
+  'fontconfig: the system fonts'
+  'xdg-utils: opening links from the window'
+)
+provides=(roch-viewer)
+conflicts=(roch-viewer)
+options=(!debug !strip)
+install=roch-viewer.install
+_dir="RochViewer-$pkgver-linux-x86_64"
+source=("$_dir.tar.gz::$url/releases/download/v$pkgver/$_dir.tar.gz")
+sha256sums=('5d0caff6efdd9bdc9ef26e77e835b978bc0128e31a5d94d7fee509ae8837d91c')
+
+package() {
+  cd "$_dir"
+  HOME="$srcdir" ./rochviewer install --prefix "$pkgdir/usr" >/dev/null
+  sed -i 's|^Exec=.*|Exec=rochviewer|' "$pkgdir/usr/share/applications/RochViewer.desktop"
+  install -Dm644 THIRD_PARTY_NOTICES.txt "$pkgdir/usr/share/licenses/$pkgname/THIRD_PARTY_NOTICES.txt"
+  install -Dm644 linux.md "$pkgdir/usr/share/doc/roch-viewer/linux.md"
+}
