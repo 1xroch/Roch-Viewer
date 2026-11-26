@@ -132,6 +132,18 @@ pub const STATUS_BUS_COLLISION: u8 = 0x08;
 pub const STATUS_FAILED: u8 = 0x10;
 pub const STATUS_ERROR_MASK: u8 = STATUS_DEV_ERR | STATUS_BUS_COLLISION | STATUS_FAILED;
 pub const STATUS_CLEAR_MASK: u8 = 0x1F;
+// INUSE_STS: a semaphore shared by everything that drives the PCH SMBus
+// (firmware, drivers, monitoring tools). Any read of the status register sets
+// it, and only writing a 1 releases it. Every transfer here reads status while
+// it waits, so it must hand the semaphore back when it ends, as Linux's
+// i2c-i801 and Roch Monitor do. Without that the bus stayed claimed after the
+// first DIMM read, and every tool that honours the semaphore (Roch Monitor
+// through PawnIO's SmbusI801 among them) timed out on the DIMM sensors until
+// the next reboot: seen on an MSI PRO Z790-P WIFI DDR4.
+pub const STATUS_INUSE: u8 = 0x40;
+// What a transfer writes to the status register as it ends: the flags cleared
+// and the semaphore released.
+pub const STATUS_RELEASE_MASK: u8 = STATUS_CLEAR_MASK | STATUS_INUSE;
 
 // JEDEC JC-42.4 thermal sensors. One address per slot, eight slots maximum.
 // This list governs the Word Data path and nothing else.
@@ -736,7 +748,7 @@ impl PchSmbusReader {
         self.outb(base + REG_HOST_CONTROL, PROTOCOL_BYTE_DATA | CONTROL_START)?;
         let result = self.wait_complete(port_status).map(|_| ());
         // Leave the controller clean for the next owner of the mutex.
-        self.outb(port_status, STATUS_CLEAR_MASK)?;
+        self.outb(port_status, STATUS_RELEASE_MASK)?;
         result
     }
 
@@ -789,7 +801,7 @@ impl PchSmbusReader {
         self.outb(base + REG_HOST_COMMAND, 0x00)?;
         self.outb(base + REG_HOST_CONTROL, PROTOCOL_BYTE | CONTROL_START)?;
         let result = self.wait_complete(port_status).map(|_| ());
-        self.outb(port_status, STATUS_CLEAR_MASK)?;
+        self.outb(port_status, STATUS_RELEASE_MASK)?;
         result
     }
 
@@ -808,7 +820,7 @@ impl PchSmbusReader {
         self.outb(base + REG_HOST_CONTROL, PROTOCOL_PROC_CALL | CONTROL_START)?;
         let result = self.wait_complete(port_status).map(|_| ());
         // Leave the controller clean for the next owner of the mutex.
-        self.outb(port_status, STATUS_CLEAR_MASK)?;
+        self.outb(port_status, STATUS_RELEASE_MASK)?;
         result
     }
 
@@ -827,7 +839,7 @@ impl PchSmbusReader {
         self.outb(base + REG_HOST_CONTROL, PROTOCOL_BYTE_DATA | CONTROL_START)?;
         let result = self.wait_complete(port_status).and_then(|_| self.inb(base + REG_HOST_DATA0));
         // Leave the controller clean for the next owner of the mutex.
-        self.outb(port_status, STATUS_CLEAR_MASK)?;
+        self.outb(port_status, STATUS_RELEASE_MASK)?;
         result
     }
 
@@ -848,7 +860,7 @@ impl PchSmbusReader {
             .wait_complete(port_status)
             .and_then(|_| Ok((self.inb(base + REG_HOST_DATA0)?, self.inb(base + REG_HOST_DATA1)?)));
         // Leave the controller clean for the next owner of the mutex.
-        self.outb(port_status, STATUS_CLEAR_MASK)?;
+        self.outb(port_status, STATUS_RELEASE_MASK)?;
         result
     }
 
@@ -1069,14 +1081,14 @@ mod tests {
     fn ddr5_the_controller_is_left_clean() {
         let io = fake_io(None, (0x8C, 0x00));
         make_reader().read_byte(0x48, 0x21, 0x00).unwrap();
-        assert_eq!(values_at(&io, BASE + REG_HOST_STATUS).last(), Some(&STATUS_CLEAR_MASK));
+        assert_eq!(values_at(&io, BASE + REG_HOST_STATUS).last(), Some(&STATUS_RELEASE_MASK));
     }
 
     #[test]
     fn ddr5_a_bus_error_raises_and_still_clears_status() {
         let io = fake_io(Some(vec![0x00, STATUS_DEV_ERR]), (0, 0));
         assert!(matches!(make_reader().read_byte(0x48, 0x21, 0x00), Err(SmbusError::Bus(_))));
-        assert_eq!(values_at(&io, BASE + REG_HOST_STATUS).last(), Some(&STATUS_CLEAR_MASK));
+        assert_eq!(values_at(&io, BASE + REG_HOST_STATUS).last(), Some(&STATUS_RELEASE_MASK));
     }
 
     #[test]
@@ -1397,7 +1409,7 @@ mod tests {
     fn a_write_leaves_the_controller_clean() {
         let io = fake_io(None, (0, 0));
         make_reader().write_byte(0x48, 0x30, 0x80, 0x00).unwrap();
-        assert_eq!(values_at(&io, BASE + REG_HOST_STATUS).last(), Some(&STATUS_CLEAR_MASK));
+        assert_eq!(values_at(&io, BASE + REG_HOST_STATUS).last(), Some(&STATUS_RELEASE_MASK));
     }
 
     #[test]
@@ -1492,14 +1504,24 @@ mod tests {
     fn status_is_cleared_before_and_after() {
         let io = fake_io(None, (0xC1, 0xE8));
         make_reader().read_word_bytes(0x19, 0x05).unwrap();
-        assert_eq!(values_at(&io, BASE + REG_HOST_STATUS), vec![STATUS_CLEAR_MASK, STATUS_CLEAR_MASK]);
+        assert_eq!(values_at(&io, BASE + REG_HOST_STATUS), vec![STATUS_CLEAR_MASK, STATUS_RELEASE_MASK]);
+    }
+
+    #[test]
+    fn every_transfer_hands_back_the_in_use_semaphore() {
+        // Reading status claims INUSE_STS; only writing bit 6 releases it.
+        assert_eq!(STATUS_RELEASE_MASK, 0x5F);
+        let io = fake_io(None, (0xC1, 0xE8));
+        make_reader().read_word_bytes(0x19, 0x05).unwrap();
+        let last = *values_at(&io, BASE + REG_HOST_STATUS).last().unwrap();
+        assert_eq!(last & STATUS_INUSE, STATUS_INUSE, "status 0x{last:02X} leaves the bus claimed");
     }
 
     #[test]
     fn a_bus_error_raises_and_still_clears_status() {
         let io = fake_io(Some(vec![0x00, STATUS_DEV_ERR]), (0, 0));
         assert!(matches!(make_reader().read_word_bytes(0x19, 0x05), Err(SmbusError::Bus(_))));
-        assert_eq!(writes(&io).last(), Some(&(BASE + REG_HOST_STATUS, STATUS_CLEAR_MASK)));
+        assert_eq!(writes(&io).last(), Some(&(BASE + REG_HOST_STATUS, STATUS_RELEASE_MASK)));
     }
 
     #[test]
