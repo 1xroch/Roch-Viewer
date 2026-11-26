@@ -236,7 +236,7 @@ fn system_info_columns_are_independent() {
 #[test]
 fn the_footer_links_to_the_handle_it_names() {
     use super::app::*;
-    assert_eq!(TWITTER_URL, "https://x.com/MateoPCTech");
+    assert_eq!(TWITTER_URL, "https://x.com/1xroch");
     assert!(TWITTER_URL.ends_with(TWITTER_HANDLE.trim_start_matches('@')));
     assert_eq!(YOUTUBE_URL, "https://www.youtube.com/@MateoPcTech");
     assert_eq!(YOUTUBE_LABEL, "YouTube");

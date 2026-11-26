@@ -56,9 +56,9 @@ pub const TOOL_BUTTON_HEIGHT: f32 = 24.0;
 pub const TOOL_BUTTON_WIDTH: f32 = 60.0;
 pub const TOOL_BUTTON_GAP: f32 = 4.0;
 
-pub const TWITTER_URL: &str = "https://x.com/MateoPCTech";
+pub const TWITTER_URL: &str = "https://x.com/1xroch";
 #[allow(dead_code)]
-pub const TWITTER_HANDLE: &str = "@MateoPCTech";
+pub const TWITTER_HANDLE: &str = "@1xroch";
 pub const TWITTER_LABEL: &str = "X";
 pub const YOUTUBE_URL: &str = "https://www.youtube.com/@MateoPcTech";
 pub const YOUTUBE_LABEL: &str = "YouTube";

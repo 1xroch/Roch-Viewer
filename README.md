@@ -48,8 +48,8 @@ cargo build --release --locked
 
 Output: `target\release\RochViewer.exe`. Tests: `cargo test --workspace --locked`.
 
-Created by **Roch Studio / MateoPCTech**.
+Created by **Roch Studio / [@1xroch](https://x.com/1xroch)**.
 
-[YouTube](https://www.youtube.com/@MateoPcTech) | [X](https://x.com/MateoPCTech) | [Discord](https://discord.gg/KfzExpKQHB)
+[YouTube](https://www.youtube.com/@MateoPcTech) | [X](https://x.com/1xroch) | [Discord](https://discord.gg/KfzExpKQHB)
 
 [License](LICENSE) · [Credits and third-party notices](THIRD_PARTY_NOTICES.txt) · [Changelog](CHANGELOG.md)
